@@ -11,12 +11,8 @@ import math
 from collections import OrderedDict
 
 import json
-import cv2
-import PIL.Image
-
 from sklearn.model_selection import train_test_split
-from labelme import utils
-
+from tqdm import tqdm
 
 class Labelme2YOLO(object):
 
@@ -209,16 +205,18 @@ class Labelme2YOLO(object):
             # 3. 修改循环逻辑
             for target_dir, json_paths in zip(('train/', 'val/'),
                                               (train_json_paths, val_json_paths)):
-                for json_path in json_paths:
+                # 为每个数据集（train/val）创建进度条
+                split_name = target_dir.replace('/', '')
+                for json_path in tqdm(json_paths, desc=f'Converting {split_name}', unit='file'):
                     json_name = os.path.basename(json_path)  # 获取文件名（最后一维）
                     json_data = json.load(open(json_path))
-
-                    print('Converting %s for %s ...' % (json_name, target_dir.replace('/', '')))
 
                     img_path = self._save_yolo_image(json_data,
                                                      json_path,
                                                      self._image_dir_path,
                                                      target_dir)
+                    if img_path is None:
+                        continue
 
                     yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
                     self._save_yolo_label(json_name,
@@ -228,6 +226,7 @@ class Labelme2YOLO(object):
 
             print('Generating dataset.yaml file ...')
             self._save_dataset_yaml()
+
     def _get_circle_shape_yolo_object(self, shape, img_h, img_w):
         label_id = self._label_id_map[shape['label']]
         obj_center_x, obj_center_y = shape['points'][0]
@@ -335,7 +334,7 @@ class Labelme2YOLO(object):
             return None
 
         shutil.copy2(src_img_path, dst_img_path)
-        print(f"Copied image: {src_img_path} -> {dst_img_path}")
+        # print(f"Copied image: {src_img_path} -> {dst_img_path}")
         return dst_img_path
 
 
