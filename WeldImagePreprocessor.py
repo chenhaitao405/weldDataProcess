@@ -113,28 +113,20 @@ class WeldImagePreprocessor:
         Returns:
             增强后的8位3通道图像
         """
-        # 1. 对比度拉伸
+        # 1. 转换为8位并进行直方图均衡
         if image.dtype == np.uint16:
-            # 16位图像的对比度拉伸
-            p2, p98 = np.percentile(image, (2, 98))
-            if p98 > p2:
-                image_stretched = np.clip((image - p2) / (p98 - p2) * 65535, 0, 65535).astype(np.uint16)
-            else:
-                image_stretched = image
-
-            # 转换为8位
-            image_8bit = (image_stretched / 256).astype(np.uint8)
+            # 16位转8位
+            image_8bit = (image / 256).astype(np.uint8)
         else:
-            # 8位图像的对比度拉伸
-            p2, p98 = np.percentile(image, (2, 98))
-            if p98 > p2:
-                image_8bit = np.clip((image - p2) / (p98 - p2) * 255, 0, 255).astype(np.uint8)
-            else:
-                image_8bit = image
+            # 已经是8位
+            image_8bit = image
+
+        # 直方图均衡
+        image_equalized = cv2.equalizeHist(image_8bit)
 
         # 2. CLAHE处理
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        image_clahe = clahe.apply(image_8bit)
+        image_clahe = clahe.apply(image_equalized)
 
         # 3. 转换为3通道图像
         image_3ch = cv2.cvtColor(image_clahe, cv2.COLOR_GRAY2BGR)
@@ -459,7 +451,7 @@ def main():
     """主函数"""
     # 设置输入输出路径
     input_dir = "/home/num2/datasets/Xray/crop_weld_data"  # 当前目录，包含crop_weld_images和crop_weld_jsons
-    output_dir = "./preprocessed_data"  # 输出目录
+    output_dir = "./preprocessed_data2"  # 输出目录
 
     # 处理数据集
     process_weld_dataset(input_dir, output_dir, overlap_ratio=0.5, balance=False)
