@@ -16,10 +16,11 @@ from tqdm import tqdm
 
 class Labelme2YOLO(object):
 
-    def __init__(self, json_dir, to_seg=False, filter_label=None):
+    def __init__(self, json_dir, to_seg=False, filter_label=None, unify_to_crack=False):
         self._json_dir = json_dir
         self._to_seg = to_seg
         self._filter_label = filter_label  # 添加过滤标签参数
+        self._unify_to_crack = unify_to_crack  # 添加统一标签参数
 
         # 获取标签映射（过滤指定标签）
         self._label_id_map = self._get_label_id_map(self._json_dir)
@@ -42,6 +43,10 @@ class Labelme2YOLO(object):
             os.makedirs(yolo_path)
 
     def _get_label_id_map(self, json_dir):
+        # 如果启用了统一标签功能，直接返回只包含crack的映射
+        if self._unify_to_crack:
+            return OrderedDict([('crack', 0)])
+
         label_set = set()
 
         for file_name in os.listdir(json_dir):
@@ -154,6 +159,10 @@ class Labelme2YOLO(object):
 
 
     def _get_label_id_map_all(self, all_json_paths):
+        # 如果启用了统一标签功能，直接返回只包含crack的映射
+        if self._unify_to_crack:
+            return OrderedDict([('crack', 0)])
+
         label_set = set()
 
         for json_path in all_json_paths:
@@ -228,7 +237,12 @@ class Labelme2YOLO(object):
             self._save_dataset_yaml()
 
     def _get_circle_shape_yolo_object(self, shape, img_h, img_w):
-        label_id = self._label_id_map[shape['label']]
+        # 如果启用了统一标签，使用'crack'的ID（0），否则使用原标签的ID
+        if self._unify_to_crack:
+            label_id = 0  # crack的ID总是0
+        else:
+            label_id = self._label_id_map[shape['label']]
+
         obj_center_x, obj_center_y = shape['points'][0]
 
         radius = math.sqrt((obj_center_x - shape['points'][1][0]) ** 2 +
@@ -275,7 +289,11 @@ class Labelme2YOLO(object):
         return label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h
 
     def _get_other_shape_yolo_object(self, shape, img_h, img_w):
-        label_id = self._label_id_map[shape['label']]
+        # 如果启用了统一标签，使用'crack'的ID（0），否则使用原标签的ID
+        if self._unify_to_crack:
+            label_id = 0  # crack的ID总是0
+        else:
+            label_id = self._label_id_map[shape['label']]
 
         if self._to_seg:
             retval = [label_id]
@@ -369,9 +387,15 @@ if __name__ == '__main__':
     # 添加过滤标签参数
     parser.add_argument('--filter_label', type=str, default="焊缝",
                         help='Label to filter out (e.g., "焊缝")')
+    # 添加统一标签参数
+    parser.add_argument('--unify_to_crack', action='store_true',
+                        help='Unify all labels to "crack" (all defect types will be defined as crack)')
     args = parser.parse_args(sys.argv[1:])
 
-    convertor = Labelme2YOLO(args.json_dir, to_seg=args.seg, filter_label=args.filter_label)
+    convertor = Labelme2YOLO(args.json_dir,
+                             to_seg=args.seg,
+                             filter_label=args.filter_label,
+                             unify_to_crack=args.unify_to_crack)
     if args.json_name is None:
         convertor.convert_mypath(val_size=args.val_size)
     else:

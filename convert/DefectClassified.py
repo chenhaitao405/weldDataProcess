@@ -1,94 +1,168 @@
 '''
-缺陷图像分类脚本
-根据是否有标注（缺陷）将图像分类到good和bad目录
-Created on 2024
+Created on Aug 18, 2021
+
+@author: xiaosonh
 '''
 import os
 import sys
 import argparse
 import shutil
-import json
-from tqdm import tqdm
+import math
 from collections import OrderedDict
 
-class DefectImageClassifier(object):
+import json
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
-    def __init__(self, json_dir, to_seg=False, filter_label=None):
+class Labelme2YOLO(object):
+
+    def __init__(self, json_dir, to_seg=False, filter_label=None, unify_to_crack=False):
         self._json_dir = json_dir
         self._to_seg = to_seg
-        self._filter_label = filter_label
+        self._filter_label = filter_label  # 添加过滤标签参数
+        self._unify_to_crack = unify_to_crack  # 添加统一标签参数
 
-        # 输出目录
-        self._output_dir = os.path.join(self._json_dir, 'DefectClassified')
-        self._good_dir = os.path.join(self._output_dir, 'good')
-        self._bad_dir = os.path.join(self._output_dir, 'bad')
+        # 获取标签映射（过滤指定标签）
+        self._label_id_map = self._get_label_id_map(self._json_dir)
 
-        # 统计信息
-        self._good_count = 0
-        self._bad_count = 0
-        self._missing_image_count = 0
+        i = 'YOLODataset'
+        i += '_seg/' if to_seg else '/'
+        self._save_path_pfx = os.path.join(self._json_dir, i)
 
-    def _make_output_dirs(self):
-        """创建输出目录结构"""
-        # 如果输出目录存在，先删除
-        if os.path.exists(self._output_dir):
-            shutil.rmtree(self._output_dir)
+    def _make_train_val_dir(self):
+        self._label_dir_path = os.path.join(self._save_path_pfx, 'labels/')
+        self._image_dir_path = os.path.join(self._save_path_pfx, 'images/')
 
-        # 创建good和bad目录及其子目录
-        for base_dir in [self._good_dir, self._bad_dir]:
-            os.makedirs(os.path.join(base_dir, 'images'), exist_ok=True)
-            os.makedirs(os.path.join(base_dir, 'labels'), exist_ok=True)
+        for yolo_path in (os.path.join(self._label_dir_path + 'train/'),
+                          os.path.join(self._label_dir_path + 'val/'),
+                          os.path.join(self._image_dir_path + 'train/'),
+                          os.path.join(self._image_dir_path + 'val/')):
+            if os.path.exists(yolo_path):
+                shutil.rmtree(yolo_path)
 
-    def _get_all_json_paths(self):
-        """获取所有json文件路径"""
-        json_paths = []
+            os.makedirs(yolo_path)
 
-        # 检查是否有labels/L和labels/T目录结构（参考原脚本的convert_mypath方法）
-        labels_dir = os.path.join(self._json_dir, 'labels')
-        if os.path.exists(labels_dir):
-            for folder in ['L', 'T']:
-                folder_path = os.path.join(labels_dir, folder)
-                if os.path.exists(folder_path):
-                    for split in ['train', 'val']:
-                        split_path = os.path.join(folder_path, split)
-                        if os.path.exists(split_path):
-                            for json_file in os.listdir(split_path):
-                                if json_file.endswith('.json'):
-                                    json_paths.append(os.path.join(split_path, json_file))
+    def _get_label_id_map(self, json_dir):
+        # 如果启用了统一标签功能，直接返回只包含crack的映射
+        if self._unify_to_crack:
+            return OrderedDict([('crack', 0)])
 
-        # 如果没有找到，则直接从json_dir读取
-        if not json_paths:
-            for file_name in os.listdir(self._json_dir):
-                if file_name.endswith('.json'):
-                    json_paths.append(os.path.join(self._json_dir, file_name))
+        label_set = set()
 
-        return json_paths
+        for file_name in os.listdir(json_dir):
+            if file_name.endswith('json'):
+                json_path = os.path.join(json_dir, file_name)
+                data = json.load(open(json_path))
+                for shape in data['shapes']:
+                    label = shape['label']
+                    # 过滤指定标签
+                    if self._filter_label and label == self._filter_label:
+                        continue
+                    label_set.add(label)
 
-    def _check_has_defect(self, json_data):
-        """
-        检查json数据中是否有缺陷（有效的标注）
-        返回：(has_defect, valid_shapes)
-        """
-        valid_shapes = []
+        return OrderedDict([(label, label_id) \
+                            for label_id, label in enumerate(label_set)])
 
-        for shape in json_data.get('shapes', []):
-            label = shape.get('label')
+    def _train_test_split(self, folders, json_names, val_size):
+        if len(folders) > 0 and 'train' in folders and 'val' in folders:
+            train_folder = os.path.join(self._json_dir, 'train/')
+            train_json_names = [train_sample_name + '.json' \
+                                for train_sample_name in os.listdir(train_folder) \
+                                if os.path.isdir(os.path.join(train_folder, train_sample_name))]
 
+            val_folder = os.path.join(self._json_dir, 'val/')
+            val_json_names = [val_sample_name + '.json' \
+                              for val_sample_name in os.listdir(val_folder) \
+                              if os.path.isdir(os.path.join(val_folder, val_sample_name))]
+
+            return train_json_names, val_json_names
+
+        train_idxs, val_idxs = train_test_split(range(len(json_names)),
+                                                test_size=val_size)
+        train_json_names = [json_names[train_idx] for train_idx in train_idxs]
+        val_json_names = [json_names[val_idx] for val_idx in val_idxs]
+
+        return train_json_names, val_json_names
+
+    def convert(self, val_size):
+        json_names = [file_name for file_name in os.listdir(self._json_dir) \
+                      if os.path.isfile(os.path.join(self._json_dir, file_name)) and \
+                      file_name.endswith('.json')]
+        folders = [file_name for file_name in os.listdir(self._json_dir) \
+                   if os.path.isdir(os.path.join(self._json_dir, file_name))]
+        train_json_names, val_json_names = self._train_test_split(folders, json_names, val_size)
+
+        self._make_train_val_dir()
+
+        # convert labelme object to yolo format object, and save them to files
+        # also get image from labelme json file and save them under images folder
+        for target_dir, json_names in zip(('train/', 'val/'),
+                                          (train_json_names, val_json_names)):
+            for json_name in json_names:
+                json_path = os.path.join(self._json_dir, json_name)
+                json_data = json.load(open(json_path))
+
+                print('Converting %s for %s ...' % (json_name, target_dir.replace('/', '')))
+
+                img_path = self._save_yolo_image(json_data,
+                                                 json_name,
+                                                 self._image_dir_path,
+                                                 target_dir)
+
+                yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
+                self._save_yolo_label(json_name,
+                                      self._label_dir_path,
+                                      target_dir,
+                                      yolo_obj_list)
+
+        print('Generating dataset.yaml file ...')
+        self._save_dataset_yaml()
+
+
+    def convert_one(self, json_name):
+        json_path = os.path.join(self._json_dir, json_name)
+        json_data = json.load(open(json_path))
+
+        print('Converting %s ...' % json_name)
+
+        img_path = self._save_yolo_image(json_data, json_path,
+                                         self._json_dir, '')
+
+        yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
+        self._save_yolo_label(json_name, self._json_dir,
+                              '', yolo_obj_list)
+
+    def _get_yolo_object_list(self, json_data, img_path):
+        yolo_obj_list = []
+
+        img_h = json_data['imageHeight']
+        img_w = json_data['imageWidth']
+        for shape in json_data['shapes']:
+            label = shape['label']
             # 过滤指定标签
             if self._filter_label and label == self._filter_label:
                 continue
+            # 检查points个数，如果小于3则跳过
+            if 'points' in shape and len(shape['points']) < 3:
+                continue
 
-            # 检查points个数，如果小于3则跳过（除了circle类型）
-            if shape.get('shape_type') != 'circle':
-                if 'points' in shape and len(shape['points']) < 3:
-                    continue
+            # labelme circle shape is different from others
+            # it only has 2 points, 1st is circle center, 2nd is drag end point
+            if shape['shape_type'] == 'circle':
+                yolo_obj = self._get_circle_shape_yolo_object(shape, img_h, img_w)
+            else:
+                yolo_obj = self._get_other_shape_yolo_object(shape, img_h, img_w)
 
-            valid_shapes.append(shape)
+            yolo_obj_list.append(yolo_obj)
 
-        return len(valid_shapes) > 0, valid_shapes
+        return yolo_obj_list
 
-    def _get_label_id_map(self, all_json_paths):
-        """获取所有标签的映射"""
+
+    def _get_label_id_map_all(self, all_json_paths):
+        # 如果启用了统一标签功能，直接返回只包含crack的映射
+        if self._unify_to_crack:
+            return OrderedDict([('crack', 0)])
+
         label_set = set()
 
         for json_path in all_json_paths:
@@ -110,203 +184,226 @@ class DefectImageClassifier(object):
         return OrderedDict([(label, label_id)
                             for label_id, label in enumerate(sorted(label_set))])
 
-    def _convert_to_yolo_format(self, shape, img_h, img_w, label_id):
-        """将shape转换为YOLO格式（参考原脚本）"""
-        if self._to_seg:
-            # 分割格式
-            retval = [label_id]
-            if shape['shape_type'] == 'circle':
-                # circle的特殊处理（省略具体实现，参考原脚本）
-                pass
-            else:
-                for point in shape['points']:
-                    retval.append(round(float(point[0]) / img_w, 6))
-                    retval.append(round(float(point[1]) / img_h, 6))
-            return retval
+    def convert_mypath(self, val_size):
+
+            # 1. 从labels目录下的L和T文件夹中获取train和val的json文件
+            train_json_paths = []
+            val_json_paths = []
+
+            labels_dir = os.path.join(self._json_dir, 'labels')
+            for folder in ['L', 'T']:
+                folder_path = os.path.join(labels_dir, folder)
+                if os.path.exists(folder_path):
+                    # 获取train目录下的json文件
+                    train_path = os.path.join(folder_path, 'train')
+                    if os.path.exists(train_path):
+                        for json_file in os.listdir(train_path):
+                            if json_file.endswith('.json'):
+                                train_json_paths.append(os.path.join(train_path, json_file))
+
+                    # 获取val目录下的json文件
+                    val_path = os.path.join(folder_path, 'val')
+                    if os.path.exists(val_path):
+                        for json_file in os.listdir(val_path):
+                            if json_file.endswith('.json'):
+                                val_json_paths.append(os.path.join(val_path, json_file))
+
+            self._label_id_map = self._get_label_id_map_all( train_json_paths + val_json_paths)
+            self._make_train_val_dir()
+
+            # 3. 修改循环逻辑
+            for target_dir, json_paths in zip(('train/', 'val/'),
+                                              (train_json_paths, val_json_paths)):
+                # 为每个数据集（train/val）创建进度条
+                split_name = target_dir.replace('/', '')
+                for json_path in tqdm(json_paths, desc=f'Converting {split_name}', unit='file'):
+                    json_name = os.path.basename(json_path)  # 获取文件名（最后一维）
+                    json_data = json.load(open(json_path))
+
+                    img_path = self._save_yolo_image(json_data,
+                                                     json_path,
+                                                     self._image_dir_path,
+                                                     target_dir)
+                    if img_path is None:
+                        continue
+
+                    yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
+                    self._save_yolo_label(json_name,
+                                          self._label_dir_path,
+                                          target_dir,
+                                          yolo_obj_list)
+
+            print('Generating dataset.yaml file ...')
+            self._save_dataset_yaml()
+
+    def _get_circle_shape_yolo_object(self, shape, img_h, img_w):
+        # 如果启用了统一标签，使用'crack'的ID（0），否则使用原标签的ID
+        if self._unify_to_crack:
+            label_id = 0  # crack的ID总是0
         else:
-            # 检测框格式
-            if shape['shape_type'] == 'circle':
-                # circle的特殊处理
-                center_x, center_y = shape['points'][0]
-                import math
-                radius = math.sqrt((center_x - shape['points'][1][0]) ** 2 +
-                                   (center_y - shape['points'][1][1]) ** 2)
+            label_id = self._label_id_map[shape['label']]
 
-                yolo_center_x = round(float(center_x / img_w), 6)
-                yolo_center_y = round(float(center_y / img_h), 6)
-                yolo_w = round(float(2 * radius / img_w), 6)
-                yolo_h = round(float(2 * radius / img_h), 6)
-            else:
-                # 其他形状
-                x_coords = [p[0] for p in shape['points']]
-                y_coords = [p[1] for p in shape['points']]
+        obj_center_x, obj_center_y = shape['points'][0]
 
-                x_min, x_max = min(x_coords), max(x_coords)
-                y_min, y_max = min(y_coords), max(y_coords)
+        radius = math.sqrt((obj_center_x - shape['points'][1][0]) ** 2 +
+                           (obj_center_y - shape['points'][1][1]) ** 2)
 
-                obj_w = x_max - x_min
-                obj_h = y_max - y_min
+        if self._to_seg:
+            retval = [label_id]
 
-                yolo_center_x = round(float((x_min + obj_w / 2.0) / img_w), 6)
-                yolo_center_y = round(float((y_min + obj_h / 2.0) / img_h), 6)
-                yolo_w = round(float(obj_w / img_w), 6)
-                yolo_h = round(float(obj_h / img_h), 6)
+            n_part = radius / 10
+            n_part = int(n_part) if n_part > 4 else 4
+            n_part2 = n_part << 1
 
-            return [label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h]
+            pt_quad = [None for i in range(0, 4)]
+            pt_quad[0] = [[obj_center_x + math.cos(i * math.pi / n_part2) * radius,
+                           obj_center_y - math.sin(i * math.pi / n_part2) * radius]
+                          for i in range(1, n_part)]
+            pt_quad[1] = [[obj_center_x * 2 - x1, y1] for x1, y1 in pt_quad[0]]
+            pt_quad[1].reverse()
+            pt_quad[3] = [[x1, obj_center_y * 2 - y1] for x1, y1 in pt_quad[0]]
+            pt_quad[3].reverse()
+            pt_quad[2] = [[obj_center_x * 2 - x1, y1] for x1, y1 in pt_quad[3]]
+            pt_quad[2].reverse()
 
-    def _save_yolo_label(self, valid_shapes, json_data, label_path, label_id_map):
-        """保存YOLO格式的标签文件"""
-        img_h = json_data['imageHeight']
-        img_w = json_data['imageWidth']
+            pt_quad[0].append([obj_center_x, obj_center_y - radius])
+            pt_quad[1].append([obj_center_x - radius, obj_center_y])
+            pt_quad[2].append([obj_center_x, obj_center_y + radius])
+            pt_quad[3].append([obj_center_x + radius, obj_center_y])
 
-        yolo_objects = []
-        for shape in valid_shapes:
-            label = shape.get('label')
-            if label is None or label == '':
-                label = 'NONE'
+            for i in pt_quad:
+                for j in i:
+                    j[0] = round(float(j[0]) / img_w, 6)
+                    j[1] = round(float(j[1]) / img_h, 6)
+                    retval.extend(j)
+            return retval
 
-            if label in label_id_map:
-                label_id = label_id_map[label]
-                yolo_obj = self._convert_to_yolo_format(shape, img_h, img_w, label_id)
-                yolo_objects.append(yolo_obj)
+        obj_w = 2 * radius
+        obj_h = 2 * radius
 
-        # 写入标签文件
-        with open(label_path, 'w') as f:
-            for i, yolo_obj in enumerate(yolo_objects):
-                line = ' '.join(str(x) for x in yolo_obj)
-                if i < len(yolo_objects) - 1:
-                    line += '\n'
-                f.write(line)
+        yolo_center_x = round(float(obj_center_x / img_w), 6)
+        yolo_center_y = round(float(obj_center_y / img_h), 6)
+        yolo_w = round(float(obj_w / img_w), 6)
+        yolo_h = round(float(obj_h / img_h), 6)
 
-    def _copy_image(self, json_path, target_image_dir, json_name):
-        """复制图像文件"""
-        # 尝试多种可能的图像路径
+        return label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h
+
+    def _get_other_shape_yolo_object(self, shape, img_h, img_w):
+        # 如果启用了统一标签，使用'crack'的ID（0），否则使用原标签的ID
+        if self._unify_to_crack:
+            label_id = 0  # crack的ID总是0
+        else:
+            label_id = self._label_id_map[shape['label']]
+
+        if self._to_seg:
+            retval = [label_id]
+            for i in shape['points']:
+                i[0] = round(float(i[0]) / img_w, 6)
+                i[1] = round(float(i[1]) / img_h, 6)
+                retval.extend(i)
+            return retval
+
+        def __get_object_desc(obj_port_list):
+            __get_dist = lambda int_list: max(int_list) - min(int_list)
+
+            x_lists = [port[0] for port in obj_port_list]
+            y_lists = [port[1] for port in obj_port_list]
+
+            return min(x_lists), __get_dist(x_lists), min(y_lists), __get_dist(y_lists)
+
+        obj_x_min, obj_w, obj_y_min, obj_h = __get_object_desc(shape['points'])
+
+        yolo_center_x = round(float((obj_x_min + obj_w / 2.0) / img_w), 6)
+        yolo_center_y = round(float((obj_y_min + obj_h / 2.0) / img_h), 6)
+        yolo_w = round(float(obj_w / img_w), 6)
+        yolo_h = round(float(obj_h / img_h), 6)
+
+        return label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h
+
+    def _save_yolo_label(self, json_name, label_dir_path, target_dir, yolo_obj_list):
+        txt_path = os.path.join(label_dir_path,
+                                target_dir,
+                                json_name.replace('.json', '.txt'))
+
+        # 只有当有对象时才写入文件
+        if yolo_obj_list:
+            with open(txt_path, 'w+') as f:
+                for yolo_obj_idx, yolo_obj in enumerate(yolo_obj_list):
+                    yolo_obj_line = ""
+                    for i in yolo_obj:
+                        yolo_obj_line += f'{i} '
+                    yolo_obj_line = yolo_obj_line[:-1]
+                    if yolo_obj_idx != len(yolo_obj_list) - 1:
+                        yolo_obj_line += '\n'
+                    f.write(yolo_obj_line)
+        else:
+            # 如果没有对象，创建空文件（或跳过）
+            open(txt_path, 'w').close()
+
+    def _save_yolo_image(self, json_data, json_path, image_dir_path, target_dir):
+        json_name = os.path.basename(json_path)
         img_name = json_name.replace('.json', '.jpg')
 
-        # 可能的图像路径
-        possible_paths = [
-            json_path.replace('.json', '.jpg').replace('/labels/', '/images/'),
-            json_path.replace('.json', '.jpg'),
-            json_path.replace('.json', '.png').replace('/labels/', '/images/'),
-            json_path.replace('.json', '.png'),
-            os.path.join(os.path.dirname(json_path), img_name),
-            os.path.join(self._json_dir, 'images', img_name)
-        ]
+        # 根据是否有target_dir来判断是批量转换还是单个转换
+        if target_dir:
+            # 批量转换模式
+            src_img_path = json_path.replace('.json', '.jpg').replace('/labels/', '/images/')
+            dst_img_path = os.path.join(image_dir_path, target_dir, img_name)
+        else:
+            # 单个文件转换模式
+            src_img_path = json_path.replace('.json', '.jpg')
+            dst_img_path = os.path.join(image_dir_path, img_name)
 
-        for src_path in possible_paths:
-            if os.path.exists(src_path):
-                dst_path = os.path.join(target_image_dir, os.path.basename(src_path))
-                shutil.copy2(src_path, dst_path)
-                return True
+        if not os.path.exists(src_img_path):
+            print(f"警告: 未找到图像文件: {src_img_path}")  # 可选的提示信息
+            return None
 
-        print(f"警告: 未找到图像文件: {json_name}")
-        self._missing_image_count += 1
-        return False
+        shutil.copy2(src_img_path, dst_img_path)
+        # print(f"Copied image: {src_img_path} -> {dst_img_path}")
+        return dst_img_path
 
-    def classify(self):
-        """执行分类主流程"""
-        print("开始分类缺陷图像...")
 
-        # 创建输出目录
-        self._make_output_dirs()
 
-        # 获取所有json路径
-        json_paths = self._get_all_json_paths()
-        print(f"找到 {len(json_paths)} 个JSON文件")
+    def _save_dataset_yaml(self):
+        yaml_path = os.path.join(self._save_path_pfx, 'dataset.yaml')
 
-        if not json_paths:
-            print("错误: 未找到任何JSON文件")
-            return
+        with open(yaml_path, 'w+') as yaml_file:
+            yaml_file.write('train: %s\n' % \
+                            os.path.join(self._image_dir_path, 'train/'))
+            yaml_file.write('val: %s\n\n' % \
+                            os.path.join(self._image_dir_path, 'val/'))
+            yaml_file.write('nc: %i\n\n' % len(self._label_id_map))
 
-        # 获取标签映射
-        print("生成标签映射...")
-        label_id_map = self._get_label_id_map(json_paths)
-        print(f"找到 {len(label_id_map)} 个标签类别: {list(label_id_map.keys())}")
-
-        # 处理每个json文件
-        for json_path in tqdm(json_paths, desc="分类进度"):
-            json_name = os.path.basename(json_path)
-
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-
-                # 检查是否有缺陷
-                has_defect, valid_shapes = self._check_has_defect(json_data)
-
-                if has_defect:
-                    # 有缺陷，放到bad目录
-                    target_dir = self._bad_dir
-                    self._bad_count += 1
-                else:
-                    # 无缺陷，放到good目录
-                    target_dir = self._good_dir
-                    self._good_count += 1
-
-                # 复制图像
-                img_copied = self._copy_image(json_path,
-                                              os.path.join(target_dir, 'images'),
-                                              json_name)
-
-                if img_copied:
-                    # 保存标签文件
-                    label_name = json_name.replace('.json', '.txt')
-                    label_path = os.path.join(target_dir, 'labels', label_name)
-
-                    if has_defect:
-                        # 有缺陷时保存YOLO格式标签
-                        self._save_yolo_label(valid_shapes, json_data,
-                                              label_path, label_id_map)
-                    else:
-                        # 无缺陷时创建空标签文件
-                        open(label_path, 'w').close()
-
-            except Exception as e:
-                print(f"处理 {json_name} 时出错: {str(e)}")
-                continue
-
-        # 输出统计信息
-        print("\n=== 分类完成 ===")
-        print(f"无缺陷图像 (good): {self._good_count}")
-        print(f"有缺陷图像 (bad): {self._bad_count}")
-        print(f"缺失图像数: {self._missing_image_count}")
-        print(f"输出目录: {self._output_dir}")
-
-        # 生成数据集配置文件
-        self._save_dataset_yaml(label_id_map)
-
-    def _save_dataset_yaml(self, label_id_map):
-        """生成dataset.yaml配置文件"""
-        yaml_path = os.path.join(self._output_dir, 'dataset.yaml')
-
-        with open(yaml_path, 'w') as f:
-            f.write(f"# 缺陷分类数据集配置\n")
-            f.write(f"# 无缺陷图像: {self._good_count}\n")
-            f.write(f"# 有缺陷图像: {self._bad_count}\n\n")
-
-            f.write(f"good: {os.path.join(self._good_dir, 'images')}\n")
-            f.write(f"bad: {os.path.join(self._bad_dir, 'images')}\n\n")
-
-            f.write(f"nc: {len(label_id_map)}\n\n")
-
-            names_str = ', '.join([f"'{label}'" for label in label_id_map.keys()])
-            f.write(f"names: [{names_str}]\n")
-
-        print(f"已生成配置文件: {yaml_path}")
+            names_str = ''
+            for label, _ in self._label_id_map.items():
+                names_str += "'%s', " % label
+            names_str = names_str.rstrip(', ')
+            yaml_file.write('names: [%s]' % names_str)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='将标注数据按是否有缺陷分类到good和bad目录')
-    parser.add_argument('--json_dir', type=str, required=True,
-                        help='labelme json文件所在的目录路径')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--json_dir', type=str,
+                        help='Please input the path of the labelme json files.')
+    parser.add_argument('--val_size', type=float, nargs='?', default=0.1,
+                        help='Please input the validation dataset size, for example 0.1 ')
+    parser.add_argument('--json_name', type=str, nargs='?', default=None,
+                        help='If you put json name, it would convert only one json file to YOLO.')
     parser.add_argument('--seg', action='store_true',
-                        help='是否转换为分割格式（默认为检测框格式）')
+                        help='Convert to YOLOv5 v7.0 segmentation dataset')
+    # 添加过滤标签参数
     parser.add_argument('--filter_label', type=str, default="焊缝",
                         help='Label to filter out (e.g., "焊缝")')
+    # 添加统一标签参数
+    parser.add_argument('--unify_to_crack', action='store_true',
+                        help='Unify all labels to "crack" (all defect types will be defined as crack)')
+    args = parser.parse_args(sys.argv[1:])
 
-    args = parser.parse_args()
-
-    classifier = DefectImageClassifier(args.json_dir,
-                                       to_seg=args.seg,
-                                       filter_label=args.filter_label)
-    classifier.classify()
+    convertor = Labelme2YOLO(args.json_dir,
+                             to_seg=args.seg,
+                             filter_label=args.filter_label,
+                             unify_to_crack=args.unify_to_crack)
+    if args.json_name is None:
+        convertor.convert_mypath(val_size=args.val_size)
+    else:
+        convertor.convert_one(args.json_name)
