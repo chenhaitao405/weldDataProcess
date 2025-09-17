@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 class Labelme2YOLO(object):
 
-    def __init__(self, json_dir, to_seg=False, filter_label=None, unify_to_crack=False):
+    def __init__(self, json_dir, to_seg=False, filter_label=None, unify_to_crack=False, output_dir=None):
         self._json_dir = json_dir
         self._to_seg = to_seg
         self._filter_label = filter_label  # 添加过滤标签参数
@@ -25,9 +25,17 @@ class Labelme2YOLO(object):
         # 获取标签映射（过滤指定标签）
         self._label_id_map = self._get_label_id_map(self._json_dir)
 
-        i = 'YOLODataset'
-        i += '_seg/' if to_seg else '/'
-        self._save_path_pfx = os.path.join(self._json_dir, i)
+        # 设置保存路径：如果提供了output_dir则使用，否则使用默认路径
+        if output_dir:
+            self._save_path_pfx = output_dir
+        else:
+            i = 'YOLODataset'
+            i += '_seg/' if to_seg else '/'
+            self._save_path_pfx = os.path.join(self._json_dir, i)
+
+        # 创建输出目录（如果不存在）
+        if not os.path.exists(self._save_path_pfx):
+            os.makedirs(self._save_path_pfx)
 
     def _make_train_val_dir(self):
         self._label_dir_path = os.path.join(self._save_path_pfx, 'labels/')
@@ -361,10 +369,13 @@ class Labelme2YOLO(object):
         yaml_path = os.path.join(self._save_path_pfx, 'dataset.yaml')
 
         with open(yaml_path, 'w+') as yaml_file:
-            yaml_file.write('train: %s\n' % \
-                            os.path.join(self._image_dir_path, 'train/'))
-            yaml_file.write('val: %s\n\n' % \
-                            os.path.join(self._image_dir_path, 'val/'))
+            # 使用相对路径或绝对路径，取决于需求
+            # 这里使用绝对路径以确保YOLO能正确找到数据
+            train_path = os.path.abspath(os.path.join(self._image_dir_path, 'train/'))
+            val_path = os.path.abspath(os.path.join(self._image_dir_path, 'val/'))
+
+            yaml_file.write('train: %s\n' % train_path)
+            yaml_file.write('val: %s\n\n' % val_path)
             yaml_file.write('nc: %i\n\n' % len(self._label_id_map))
 
             names_str = ''
@@ -373,10 +384,13 @@ class Labelme2YOLO(object):
             names_str = names_str.rstrip(', ')
             yaml_file.write('names: [%s]' % names_str)
 
+        print(f'Dataset.yaml saved to: {yaml_path}')
+        print(f'Output directory: {self._save_path_pfx}')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--json_dir', type=str,
+    parser.add_argument('--json_dir', type=str,default=None,
                         help='Please input the path of the labelme json files.')
     parser.add_argument('--val_size', type=float, nargs='?', default=0.1,
                         help='Please input the validation dataset size, for example 0.1 ')
@@ -390,13 +404,17 @@ if __name__ == '__main__':
     # 添加统一标签参数
     parser.add_argument('--unify_to_crack', action='store_true',
                         help='Unify all labels to "crack" (all defect types will be defined as crack)')
+    # 添加输出目录参数
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Output directory for YOLO dataset (default: json_dir/YOLODataset[_seg])')
     args = parser.parse_args(sys.argv[1:])
 
     convertor = Labelme2YOLO(args.json_dir,
                              to_seg=args.seg,
                              filter_label=args.filter_label,
-                             unify_to_crack=args.unify_to_crack)
+                             unify_to_crack=args.unify_to_crack,
+                             output_dir=args.output_dir)
     if args.json_name is None:
-        convertor.convert_mypath(val_size=args.val_size)
+        convertor.convert(args.json_name)
     else:
-        convertor.convert_one(args.json_name)
+        convertor.convert_mypath(val_size=args.val_size)
