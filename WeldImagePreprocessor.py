@@ -12,19 +12,172 @@ import shutil
 class WeldImagePreprocessor:
     """焊缝X射线图像预处理器，实现滑动窗口裁剪和图像增强"""
 
-    def __init__(self, overlap_ratio: float = 0.5):
+    def __init__(self, overlap_ratio: float = 0.5, enhance_mode: str = 'original'):
         """
         初始化预处理器
 
         Args:
             overlap_ratio: 滑动窗口重叠率，默认0.5（50%）
+            enhance_mode: 增强模式，可选值:
+                - 'original': 原始方法（直方图均衡 + CLAHE）
+                - 'windowing': 窗宽窗位方法（自适应窗口映射）
         """
         self.overlap_ratio = overlap_ratio
+
+        # 验证增强模式
+        if enhance_mode not in ['original', 'windowing']:
+            raise ValueError(f"Invalid enhance_mode: {enhance_mode}. Must be 'original' or 'windowing'")
+
+        self.enhance_mode = enhance_mode
 
         # 统计信息
         self.total_patches = 0
         self.patches_with_defects = 0
         self.patches_without_defects = 0
+
+        # 打印初始化信息
+        print(f"WeldImagePreprocessor initialized with:")
+        print(f"  - Overlap ratio: {self.overlap_ratio}")
+        print(f"  - Enhancement mode: {self.enhance_mode}")
+
+    def apply_window_level(self, image: np.ndarray, window_width: int,
+                           window_level: int, output_bits: int = 8) -> np.ndarray:
+        """
+        应用窗宽窗位变换（从windowing.py移植）
+
+        Args:
+            image: 输入图像（float32）
+            window_width: 窗宽
+            window_level: 窗位
+            output_bits: 输出位深度（8或16）
+
+        Returns:
+            变换后的图像
+        """
+        window_min = window_level - window_width / 2
+        window_max = window_level + window_width / 2
+
+        output = np.zeros_like(image)
+
+        if output_bits == 8:
+            max_val = 255
+            dtype = np.uint8
+        else:
+            max_val = 65535
+            dtype = np.uint16
+
+        # 窗口内的像素进行线性映射
+        mask = (image >= window_min) & (image <= window_max)
+        output[mask] = ((image[mask] - window_min) / window_width * max_val)
+
+        # 窗口外的像素
+        output[image < window_min] = 0
+        output[image > window_max] = max_val
+
+        return output.astype(dtype)
+
+    def auto_window_level(self, image: np.ndarray) -> Tuple[int, int]:
+        """
+        自动计算窗宽窗位（基于统计信息）
+
+        Args:
+            image: 输入图像
+
+        Returns:
+            (window_width, window_level)
+        """
+        # 转换为float32进行计算
+        img_float = image.astype(np.float32)
+
+        # 计算统计信息
+        img_min = np.min(img_float)
+        img_max = np.max(img_float)
+        img_mean = np.mean(img_float)
+        img_std = np.std(img_float)
+
+        # 使用均值作为窗位，4倍标准差作为窗宽（与windowing.py保持一致）
+        window_level = int(img_mean)
+        window_width = int(min(4 * img_std, img_max - img_min))
+
+        # 确保窗宽至少为1
+        window_width = max(1, window_width)
+
+        return window_width, window_level
+
+    def enhance_image_windowing(self, image: np.ndarray) -> np.ndarray:
+        """
+        使用窗宽窗位方法增强图像
+
+        Args:
+            image: 输入图像（可能是16位）
+
+        Returns:
+            增强后的8位3通道图像
+        """
+        # 确保图像是float32类型
+        if image.dtype == np.uint16:
+            img_float = image.astype(np.float32)
+        elif image.dtype == np.uint8:
+            img_float = image.astype(np.float32)
+        else:
+            img_float = image
+
+        # 自动计算窗宽窗位
+        window_width, window_level = self.auto_window_level(img_float)
+
+        # 应用窗宽窗位变换，输出8位图像
+        enhanced_8bit = self.apply_window_level(img_float, window_width, window_level, 8)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        image_clahe = clahe.apply(enhanced_8bit)
+        # 转换为3通道图像
+        image_3ch = cv2.cvtColor(image_clahe, cv2.COLOR_GRAY2BGR)
+
+        return image_3ch
+
+    def enhance_image_original(self, image: np.ndarray) -> np.ndarray:
+        """
+        原始图像增强处理方法
+
+        Args:
+            image: 输入图像（可能是16位）
+
+        Returns:
+            增强后的8位3通道图像
+        """
+        # 1. 转换为8位并进行直方图均衡
+        if image.dtype == np.uint16:
+            # 16位转8位
+            image_8bit = (image / 256).astype(np.uint8)
+        else:
+            # 已经是8位
+            image_8bit = image
+
+        # 直方图均衡
+        image_equalized = cv2.equalizeHist(image_8bit)
+
+        # 2. CLAHE处理
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        image_clahe = clahe.apply(image_equalized)
+
+        # 3. 转换为3通道图像
+        image_3ch = cv2.cvtColor(image_equalized, cv2.COLOR_GRAY2BGR)
+
+        return image_3ch
+
+    def enhance_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        图像增强处理（根据模式选择方法）
+
+        Args:
+            image: 输入图像
+
+        Returns:
+            增强后的图像
+        """
+        if self.enhance_mode == 'windowing':
+            return self.enhance_image_windowing(image)
+        else:
+            return self.enhance_image_original(image)
 
     def sliding_window_crop(self, image: np.ndarray, window_size: Tuple[int, int],
                             stride: Tuple[int, int]) -> List[Dict]:
@@ -102,36 +255,6 @@ class WeldImagePreprocessor:
                 patches.append(patch_info)
 
         return patches
-
-    def enhance_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        图像增强处理
-
-        Args:
-            image: 输入图像（可能是16位）
-
-        Returns:
-            增强后的8位3通道图像
-        """
-        # 1. 转换为8位并进行直方图均衡
-        if image.dtype == np.uint16:
-            # 16位转8位
-            image_8bit = (image / 256).astype(np.uint8)
-        else:
-            # 已经是8位
-            image_8bit = image
-
-        # 直方图均衡
-        image_equalized = cv2.equalizeHist(image_8bit)
-
-        # 2. CLAHE处理
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        image_clahe = clahe.apply(image_equalized)
-
-        # 3. 转换为3通道图像
-        image_3ch = cv2.cvtColor(image_clahe, cv2.COLOR_GRAY2BGR)
-
-        return image_3ch
 
     def adjust_annotations(self, annotations: Dict, crop_x: int, crop_y: int,
                            crop_w: int, crop_h: int) -> Dict:
@@ -225,9 +348,9 @@ class WeldImagePreprocessor:
             annotations = json.load(f)
 
         # 确定滑动窗口大小（较短边的一半）
-        #TODO: 短边一半太小
+        # TODO: 短边一半太小
         h, w = image.shape[:2]
-        window_size = min(640,  min(h, w))
+        window_size = min(640, min(h, w))
         window_size = (window_size, window_size)
 
         # 计算步长（基于重叠率）
@@ -243,7 +366,7 @@ class WeldImagePreprocessor:
         # 处理每个patch
         base_name = Path(image_path).stem
         for i, patch_info in enumerate(patches):
-            # 图像增强
+            # 图像增强（使用选定的模式）
             enhanced_patch = self.enhance_image(patch_info['patch'])
 
             # 调整标注
@@ -365,7 +488,8 @@ class WeldImagePreprocessor:
 
 
 def process_weld_dataset(input_base_dir: str, output_base_dir: str,
-                         overlap_ratio: float = 0.5, balance: bool = True):
+                         overlap_ratio: float = 0.5, balance: bool = True,
+                         enhance_mode: str = 'original'):
     """
     处理焊缝数据集的包装函数
 
@@ -374,6 +498,7 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
         output_base_dir: 输出根目录
         overlap_ratio: 滑动窗口重叠率
         balance: 是否平衡数据集
+        enhance_mode: 图像增强模式 ('original' 或 'windowing')
     """
     input_base = Path(input_base_dir)
     output_base = Path(output_base_dir)
@@ -382,8 +507,14 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
     output_image_base = output_base / 'images'
     output_label_base = output_base / 'labels'
 
-    # 创建预处理器
-    preprocessor = WeldImagePreprocessor(overlap_ratio=overlap_ratio)
+    # 创建预处理器，指定增强模式
+    preprocessor = WeldImagePreprocessor(overlap_ratio=overlap_ratio, enhance_mode=enhance_mode)
+
+    print(f"\n使用增强模式: {enhance_mode}")
+    if enhance_mode == 'original':
+        print("  - 原始方法：直方图均衡 + CLAHE")
+    else:
+        print("  - 窗宽窗位方法：自适应窗口映射")
 
     # 收集所有需要处理的文件
     all_image_paths = []
@@ -449,12 +580,62 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
 
 def main():
     """主函数"""
-    # 设置输入输出路径
-    input_dir = "/home/num2/datasets/Xray/crop_weld_data"  # 当前目录，包含crop_weld_images和crop_weld_jsons
-    output_dir = "./preprocessed_data2"  # 输出目录
+    import argparse
+
+    # 创建参数解析器
+    parser = argparse.ArgumentParser(
+        description='焊缝X射线图像预处理工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+图像增强模式说明:
+  original  - 原始方法：使用直方图均衡 + CLAHE (Contrast Limited Adaptive Histogram Equalization)
+  windowing - 窗宽窗位方法：基于每个patch的统计信息自适应调整对比度
+
+示例:
+  # 使用原始方法处理数据集
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode original
+
+  # 使用窗宽窗位方法处理数据集
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode windowing
+
+  # 使用窗宽窗位方法，50%重叠率，不平衡数据集
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode windowing --overlap 0.5 --no-balance
+        """)
+
+    parser.add_argument('--input_dir', type=str, default="/home/num2/datasets/Xray/crop_weld_data",
+                        help='输入目录路径，包含crop_weld_images和crop_weld_jsons')
+    parser.add_argument('--output_dir', type=str, default="./preprocessed_data2",
+                        help='输出目录路径')
+    parser.add_argument('--mode', type=str, choices=['original', 'windowing'], default='windowing',
+                        help='图像增强模式: original(直方图均衡+CLAHE) 或 windowing(窗宽窗位)')
+    parser.add_argument('--overlap', type=float, default=0.5,
+                        help='滑动窗口重叠率 (0.0-1.0)，默认0.5')
+    parser.add_argument('--balance', action='store_true', default=False,
+                        help='是否平衡数据集（使有缺陷和无缺陷样本数相等）')
+    parser.add_argument('--no-balance', dest='balance', action='store_false',
+                        help='不平衡数据集')
+
+    args = parser.parse_args()
+
+    # 打印配置信息
+    print("=" * 60)
+    print("焊缝X射线图像预处理")
+    print("=" * 60)
+    print(f"输入目录: {args.input_dir}")
+    print(f"输出目录: {args.output_dir}")
+    print(f"增强模式: {args.mode}")
+    print(f"重叠率: {args.overlap}")
+    print(f"平衡数据集: {args.balance}")
+    print("=" * 60)
 
     # 处理数据集
-    process_weld_dataset(input_dir, output_dir, overlap_ratio=0.5, balance=False)
+    process_weld_dataset(
+        args.input_dir,
+        args.output_dir,
+        overlap_ratio=args.overlap,
+        balance=args.balance,
+        enhance_mode=args.mode
+    )
 
 
 if __name__ == "__main__":
