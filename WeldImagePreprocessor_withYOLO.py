@@ -7,12 +7,18 @@ from typing import List, Dict, Tuple, Optional
 import random
 from tqdm import tqdm
 import shutil
+import sys
+
+# 导入labelme2yolo模块
+from convert.labelme2yolo import Labelme2YOLO
 
 
 class WeldImagePreprocessor:
-    """焊缝X射线图像预处理器，实现滑动窗口裁剪和图像增强"""
+    """焊缝X射线图像预处理器，实现滑动窗口裁剪、图像增强和标签格式转换"""
 
-    def __init__(self, overlap_ratio: float = 0.5, enhance_mode: str = 'original'):
+    def __init__(self, overlap_ratio: float = 0.5, enhance_mode: str = 'original',
+                 label_format: str = 'labelme', to_seg: bool = False,
+                 filter_label: str = None, unify_to_crack: bool = False):
         """
         初始化预处理器
 
@@ -21,24 +27,47 @@ class WeldImagePreprocessor:
             enhance_mode: 增强模式，可选值:
                 - 'original': 原始方法（直方图均衡 + CLAHE）
                 - 'windowing': 窗宽窗位方法（自适应窗口映射）
+            label_format: 标签格式，可选值:
+                - 'labelme': 保持LabelMe JSON格式（默认）
+                - 'yolo': 转换为YOLO格式
+            to_seg: 是否为分割任务（仅在label_format='yolo'时有效）
+            filter_label: 要过滤的标签名称（仅在label_format='yolo'时有效）
+            unify_to_crack: 是否将所有标签统一为"crack"（仅在label_format='yolo'时有效）
         """
         self.overlap_ratio = overlap_ratio
 
         # 验证增强模式
         if enhance_mode not in ['original', 'windowing']:
             raise ValueError(f"Invalid enhance_mode: {enhance_mode}. Must be 'original' or 'windowing'")
-
         self.enhance_mode = enhance_mode
+
+        # 验证标签格式
+        if label_format not in ['labelme', 'yolo']:
+            raise ValueError(f"Invalid label_format: {label_format}. Must be 'labelme' or 'yolo'")
+        self.label_format = label_format
+        self.to_seg = to_seg
+        self.filter_label = filter_label
+        self.unify_to_crack = unify_to_crack
 
         # 统计信息
         self.total_patches = 0
         self.patches_with_defects = 0
         self.patches_without_defects = 0
 
+        # 用于存储临时labelme格式文件路径（当需要转换为YOLO时）
+        self.temp_labelme_dir = None
+
         # 打印初始化信息
         print(f"WeldImagePreprocessor initialized with:")
         print(f"  - Overlap ratio: {self.overlap_ratio}")
         print(f"  - Enhancement mode: {self.enhance_mode}")
+        print(f"  - Label format: {self.label_format}")
+        if self.label_format == 'yolo':
+            print(f"  - Segmentation mode: {self.to_seg}")
+            if self.filter_label:
+                print(f"  - Filter label: {self.filter_label}")
+            if self.unify_to_crack:
+                print(f"  - Unify to crack: {self.unify_to_crack}")
 
     def apply_window_level(self, image: np.ndarray, window_width: int,
                            window_level: int, output_bits: int = 8) -> np.ndarray:
@@ -114,10 +143,6 @@ class WeldImagePreprocessor:
         Returns:
             增强后的8位3通道图像
         """
-        # 如果是3通道图像，转换为单通道
-        if len(image.shape) == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
         # 确保图像是float32类型
         if image.dtype == np.uint16:
             img_float = image.astype(np.float32)
@@ -135,7 +160,6 @@ class WeldImagePreprocessor:
         # CLAHE对比度增强
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         image_clahe = clahe.apply(enhanced_8bit)
-
         # 转换为3通道图像
         image_3ch = cv2.cvtColor(image_clahe, cv2.COLOR_GRAY2BGR)
 
@@ -388,7 +412,7 @@ class WeldImagePreprocessor:
             image_save_path = Path(output_image_dir) / f"{patch_name}.jpg"
             cv2.imwrite(str(image_save_path), enhanced_patch, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-            # 保存标注
+            # 保存标注（LabelMe格式）
             label_save_path = Path(output_label_dir) / f"{patch_name}.json"
             with open(label_save_path, 'w', encoding='utf-8') as f:
                 json.dump(adjusted_annotations, f, ensure_ascii=False, indent=2)
@@ -485,6 +509,69 @@ class WeldImagePreprocessor:
         # 更新统计信息
         self.patches_without_defects = num_to_keep
 
+    def convert_to_yolo(self, base_dir: str, val_size: float = 0.2):
+        """
+        将LabelMe格式转换为YOLO格式
+
+        Args:
+            base_dir: 包含images和labels目录的基础目录
+            val_size: 验证集比例
+        """
+        print("\n开始转换为YOLO格式...")
+
+        # 创建临时目录存储所有labelme格式文件
+        temp_dir = Path(base_dir) / 'temp_labelme'
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 收集所有子目录的文件到临时目录
+        images_base = Path(base_dir) / 'images'
+        labels_base = Path(base_dir) / 'labels'
+
+        print("收集文件到临时目录...")
+        for weld_type in ['L', 'T']:
+            for sub_type in ['1', '2']:
+                # 图像文件
+                img_dir = images_base / weld_type / sub_type
+                if img_dir.exists():
+                    for img_file in img_dir.glob('*.jpg'):
+                        shutil.copy2(img_file, temp_dir / img_file.name)
+
+                # 标签文件
+                label_dir = labels_base / weld_type / sub_type
+                if label_dir.exists():
+                    for json_file in label_dir.glob('*.json'):
+                        shutil.copy2(json_file, temp_dir / json_file.name)
+
+        # 创建YOLO输出目录
+        yolo_output_dir = Path(base_dir) / 'YOLODataset'
+        if self.to_seg:
+            yolo_output_dir = Path(base_dir) / 'YOLODataset_seg'
+
+        # 调用labelme2yolo转换器
+        print(f"转换标签格式到YOLO...")
+        converter = Labelme2YOLO(
+            json_dir=str(temp_dir),
+            to_seg=self.to_seg,
+            filter_label=self.filter_label,
+            unify_to_crack=self.unify_to_crack,
+            output_dir=str(yolo_output_dir)
+        )
+
+        # 执行转换
+        converter.convert(val_size=val_size)
+
+        # 清理临时目录
+        print("清理临时文件...")
+        shutil.rmtree(temp_dir)
+
+        # 删除原始的images和labels目录
+        if images_base.exists():
+            shutil.rmtree(images_base)
+        if labels_base.exists():
+            shutil.rmtree(labels_base)
+
+        print(f"YOLO格式数据集已保存到: {yolo_output_dir}")
+
     def get_statistics(self) -> Dict:
         """获取处理统计信息"""
         return {
@@ -496,7 +583,9 @@ class WeldImagePreprocessor:
 
 def process_weld_dataset(input_base_dir: str, output_base_dir: str,
                          overlap_ratio: float = 0.5, balance: bool = True,
-                         enhance_mode: str = 'original'):
+                         enhance_mode: str = 'original', label_format: str = 'labelme',
+                         to_seg: bool = False, val_size: float = 0.2,
+                         filter_label: str = None, unify_to_crack: bool = False):
     """
     处理焊缝数据集的包装函数
 
@@ -506,6 +595,11 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
         overlap_ratio: 滑动窗口重叠率
         balance: 是否平衡数据集
         enhance_mode: 图像增强模式 ('original' 或 'windowing')
+        label_format: 标签格式 ('labelme' 或 'yolo')
+        to_seg: 是否为分割任务（仅在label_format='yolo'时有效）
+        val_size: 验证集比例（仅在label_format='yolo'时有效）
+        filter_label: 要过滤的标签名称（仅在label_format='yolo'时有效）
+        unify_to_crack: 是否将所有标签统一为"crack"（仅在label_format='yolo'时有效）
     """
     input_base = Path(input_base_dir)
     output_base = Path(output_base_dir)
@@ -514,8 +608,15 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
     output_image_base = output_base / 'images'
     output_label_base = output_base / 'labels'
 
-    # 创建预处理器，指定增强模式
-    preprocessor = WeldImagePreprocessor(overlap_ratio=overlap_ratio, enhance_mode=enhance_mode)
+    # 创建预处理器
+    preprocessor = WeldImagePreprocessor(
+        overlap_ratio=overlap_ratio,
+        enhance_mode=enhance_mode,
+        label_format=label_format,
+        to_seg=to_seg,
+        filter_label=filter_label,
+        unify_to_crack=unify_to_crack
+    )
 
     print(f"\n使用增强模式: {enhance_mode}")
     if enhance_mode == 'original':
@@ -584,6 +685,10 @@ def process_weld_dataset(input_base_dir: str, output_base_dir: str,
         print(f"无缺陷的patch数: {final_stats['patches_without_defects']}")
         print(f"总patch数: {final_stats['patches_with_defects'] + final_stats['patches_without_defects']}")
 
+    # 如果需要转换为YOLO格式
+    if label_format == 'yolo':
+        preprocessor.convert_to_yolo(str(output_base), val_size=val_size)
+
 
 def main():
     """主函数"""
@@ -598,18 +703,34 @@ def main():
   original  - 原始方法：使用直方图均衡 + CLAHE (Contrast Limited Adaptive Histogram Equalization)
   windowing - 窗宽窗位方法：基于每个patch的统计信息自适应调整对比度
 
+标签格式说明:
+  labelme - 保持LabelMe JSON格式（默认）
+  yolo    - 转换为YOLO格式，生成txt标签文件和dataset.yaml
+
+YOLO特定参数:
+  --seg           - 转换为分割数据集格式（多边形标注）
+  --filter_label  - 过滤掉指定的标签
+  --unify_to_crack - 将所有标签统一为"crack"类别
+
 示例:
-  # 使用原始方法处理数据集
+  # 使用原始方法处理数据集，保持LabelMe格式
   python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode original
 
-  # 使用窗宽窗位方法处理数据集
-  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode windowing
+  # 使用窗宽窗位方法处理数据集，转换为YOLO检测格式
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode windowing --label_format yolo
 
-  # 使用窗宽窗位方法，50%重叠率，不平衡数据集
-  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --mode windowing --overlap 0.5 --no-balance
+  # 转换为YOLO分割格式，设置验证集比例为30%
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --label_format yolo --seg --val_size 0.3
+
+  # 统一所有标签为crack类别
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --label_format yolo --unify_to_crack
+
+  # 过滤掉"焊缝"标签，只保留缺陷标签
+  python WeldImagePreprocessor.py --input_dir ./data --output_dir ./output --label_format yolo --filter_label 焊缝
         """)
 
-    parser.add_argument('--input_dir', type=str, default="/home/lenovo/code/CHT/datasets/Xray/opensource/crop_weld_data",
+    parser.add_argument('--input_dir', type=str,
+                        default="/home/lenovo/code/CHT/datasets/Xray/opensource/crop_weld_data",
                         help='输入目录路径，包含crop_weld_images和crop_weld_jsons')
     parser.add_argument('--output_dir', type=str, default="./preprocessed_data2",
                         help='输出目录路径')
@@ -621,6 +742,16 @@ def main():
                         help='是否平衡数据集（使有缺陷和无缺陷样本数相等）')
     parser.add_argument('--no-balance', dest='balance', action='store_false',
                         help='不平衡数据集')
+    parser.add_argument('--label_format', type=str, choices=['labelme', 'yolo'], default='labelme',
+                        help='标签格式: labelme(JSON格式) 或 yolo(TXT格式)')
+    parser.add_argument('--seg', action='store_true', default=False,
+                        help='转换为YOLOv5 v7.0分割数据集格式（仅在label_format=yolo时有效）')
+    parser.add_argument('--val_size', type=float, default=0.2,
+                        help='验证集比例（仅在label_format=yolo时有效），默认0.2')
+    parser.add_argument('--filter_label', type=str, default=None,
+                        help='要过滤的标签名称，例如"焊缝"（仅在label_format=yolo时有效）')
+    parser.add_argument('--unify_to_crack', action='store_true', default=False,
+                        help='将所有标签统一为"crack"类别（仅在label_format=yolo时有效）')
 
     args = parser.parse_args()
 
@@ -633,6 +764,14 @@ def main():
     print(f"增强模式: {args.mode}")
     print(f"重叠率: {args.overlap}")
     print(f"平衡数据集: {args.balance}")
+    print(f"标签格式: {args.label_format}")
+    if args.label_format == 'yolo':
+        print(f"分割模式: {args.seg}")
+        print(f"验证集比例: {args.val_size}")
+        if args.filter_label:
+            print(f"过滤标签: {args.filter_label}")
+        if args.unify_to_crack:
+            print(f"统一为crack类别: 是")
     print("=" * 60)
 
     # 处理数据集
@@ -641,7 +780,12 @@ def main():
         args.output_dir,
         overlap_ratio=args.overlap,
         balance=args.balance,
-        enhance_mode=args.mode
+        enhance_mode=args.mode,
+        label_format=args.label_format,
+        to_seg=args.seg,
+        val_size=args.val_size,
+        filter_label=args.filter_label,
+        unify_to_crack=args.unify_to_crack
     )
 
 

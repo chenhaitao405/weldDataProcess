@@ -124,7 +124,7 @@ def main(data_dir, format_type='seg'):
     labels_dir = os.path.join(data_dir, 'labels', split)
 
     # List all images in the chosen split directory
-    images = [f for f in os.listdir(images_dir) if f.endswith('.jpg') or f.endswith('.png')]
+    images = [f for f in os.listdir(images_dir) if f.endswith('.jpg') or f.endswith('.png') or f.endswith('.bmp')]
 
     if not images:
         print(f"No images found in {images_dir}")

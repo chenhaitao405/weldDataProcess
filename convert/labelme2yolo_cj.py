@@ -2,6 +2,7 @@
 Created on Aug 18, 2021
 
 @author: xiaosonh
+Modified for separate label and image directories
 '''
 import os
 import sys
@@ -16,8 +17,10 @@ from tqdm import tqdm
 
 class Labelme2YOLO(object):
 
-    def __init__(self, json_dir, to_seg=False, filter_label=None, unify_to_crack=False, output_dir=None):
+    def __init__(self, json_dir, image_dir=None, to_seg=False, filter_label=None, unify_to_crack=False, output_dir=None):
         self._json_dir = json_dir
+        # 新增：图像目录参数，如果未提供则使用json目录
+        self._image_dir = image_dir if image_dir else json_dir
         self._to_seg = to_seg
         self._filter_label = filter_label  # 添加过滤标签参数
         self._unify_to_crack = unify_to_crack  # 添加统一标签参数
@@ -112,8 +115,7 @@ class Labelme2YOLO(object):
 
                 print('Converting %s for %s ...' % (json_name, target_dir.replace('/', '')))
 
-                img_path = self._save_yolo_image(self._json_dir,
-                                                 json_name,
+                img_path = self._save_yolo_image(json_name,
                                                  self._image_dir_path,
                                                  target_dir)
 
@@ -133,10 +135,10 @@ class Labelme2YOLO(object):
 
         print('Converting %s ...' % json_name)
 
-        img_path = self._save_yolo_image(json_data, json_path,
+        img_path = self._save_yolo_image(json_name,
                                          self._json_dir, '')
 
-        yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
+        yolo_obj_list = self._get_yolo_object_list(json_data)
         self._save_yolo_label(json_name, self._json_dir,
                               '', yolo_obj_list)
 
@@ -212,13 +214,8 @@ class Labelme2YOLO(object):
 
             # labelme circle shape is different from others
             # it only has 2 points, 1st is circle center, 2nd is drag end point
-            if shape['shape_type'] == 'circle':
-                yolo_obj = self._get_circle_shape_yolo_object(shape, img_h, img_w)
 
-            elif shape['shape_type'] == 'rectangle':
-                yolo_obj = self._get_rectangle_shape_yolo_object(shape, img_h, img_w)
-            else:
-                yolo_obj = self._get_other_shape_yolo_object(shape, img_h, img_w)
+            yolo_obj = self._get_other_shape_yolo_object(shape, img_h, img_w)
 
             yolo_obj_list.append(yolo_obj)
 
@@ -251,57 +248,6 @@ class Labelme2YOLO(object):
         return OrderedDict([(label, label_id)
                             for label_id, label in enumerate(sorted(label_set))])
 
-    def convert_mypath(self, val_size):
-
-            # 1. 从labels目录下的L和T文件夹中获取train和val的json文件
-            train_json_paths = []
-            val_json_paths = []
-
-            labels_dir = os.path.join(self._json_dir, 'labels')
-            for folder in ['L', 'T']:
-                folder_path = os.path.join(labels_dir, folder)
-                if os.path.exists(folder_path):
-                    # 获取train目录下的json文件
-                    train_path = os.path.join(folder_path, 'train')
-                    if os.path.exists(train_path):
-                        for json_file in os.listdir(train_path):
-                            if json_file.endswith('.json'):
-                                train_json_paths.append(os.path.join(train_path, json_file))
-
-                    # 获取val目录下的json文件
-                    val_path = os.path.join(folder_path, 'val')
-                    if os.path.exists(val_path):
-                        for json_file in os.listdir(val_path):
-                            if json_file.endswith('.json'):
-                                val_json_paths.append(os.path.join(val_path, json_file))
-
-            self._label_id_map = self._get_label_id_map_all( train_json_paths + val_json_paths)
-            self._make_train_val_dir()
-
-            # 3. 修改循环逻辑
-            for target_dir, json_paths in zip(('train/', 'val/'),
-                                              (train_json_paths, val_json_paths)):
-                # 为每个数据集（train/val）创建进度条
-                split_name = target_dir.replace('/', '')
-                for json_path in tqdm(json_paths, desc=f'Converting {split_name}', unit='file'):
-                    json_name = os.path.basename(json_path)  # 获取文件名（最后一维）
-                    json_data = json.load(open(json_path))
-
-                    img_path = self._save_yolo_image(json_data,
-                                                     json_path,
-                                                     self._image_dir_path,
-                                                     target_dir)
-                    if img_path is None:
-                        continue
-
-                    yolo_obj_list = self._get_yolo_object_list(json_data, img_path)
-                    self._save_yolo_label(json_name,
-                                          self._label_dir_path,
-                                          target_dir,
-                                          yolo_obj_list)
-
-            print('Generating dataset.yaml file ...')
-            self._save_dataset_yaml()
 
     def _get_circle_shape_yolo_object(self, shape, img_h, img_w):
         # 如果启用了统一标签，使用'crack'的ID（0），否则使用原标签的ID
@@ -388,9 +334,9 @@ class Labelme2YOLO(object):
         return label_id, yolo_center_x, yolo_center_y, yolo_w, yolo_h
 
     def _save_yolo_label(self, json_name, label_dir_path, target_dir, yolo_obj_list):
-        txt_path = os.path.join(label_dir_path,
-                                target_dir,
-                                json_name.replace('.json', '.txt'))
+        # 移除_convert后缀，保持与原始图像文件名一致
+        txt_name = json_name.replace('_convert.json', '.txt').replace('.json', '.txt')
+        txt_path = os.path.join(label_dir_path, target_dir, txt_name)
 
         # 只有当有对象时才写入文件
         if yolo_obj_list:
@@ -407,33 +353,44 @@ class Labelme2YOLO(object):
             # 如果没有对象，创建空文件（或跳过）
             open(txt_path, 'w').close()
 
-    def _save_yolo_image(self, json_dir, json_path, image_dir_path, target_dir):
-        json_name = os.path.basename(json_path)
+    def _save_yolo_image(self, json_name, image_dir_path, target_dir):
+        """
+        修改后的保存图像函数：
+        - JSON文件名格式：第二批_A-001_convert.json
+        - 图像文件名格式：第二批_A-001.bmp
+        - 需要去掉_convert后缀来匹配图像文件
+        """
         json_name_without_ext = os.path.splitext(json_name)[0]
 
-        # 支持的图片格式
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
+        # 移除_convert后缀来获取图像文件的基础名称
+        if json_name_without_ext.endswith('_convert'):
+            img_base_name = json_name_without_ext[:-8]  # 移除 '_convert' (8个字符)
+        else:
+            img_base_name = json_name_without_ext
 
-        # 查找同名的图片文件
+        # 支持的图片格式
+        image_extensions = ['.bmp', '.jpg', '.jpeg', '.png']
+
+        # 在图像目录中查找对应的图像文件
         src_img_path = None
         img_ext = None
         for ext in image_extensions:
-            potential_img_path = os.path.join(json_dir, json_name_without_ext + ext)
+            potential_img_path = os.path.join(self._image_dir, img_base_name + ext)
             if os.path.exists(potential_img_path):
                 src_img_path = potential_img_path
                 img_ext = ext
                 break
 
         if src_img_path is None:
-            print(f"警告: 未找到图像文件: {json_name_without_ext} (尝试了扩展名: {', '.join(image_extensions)})")
+            print(f"警告: 未找到图像文件: {img_base_name} 在目录 {self._image_dir} (尝试了扩展名: {', '.join(image_extensions)})")
             return None
 
         # 使用找到的扩展名保存图片
-        img_name = json_name_without_ext + img_ext
+        img_name = img_base_name + img_ext
         dst_img_path = os.path.join(image_dir_path, target_dir, img_name)
 
         shutil.copy2(src_img_path, dst_img_path)
-        # print(f"Copied image: {src_img_path} -> {dst_img_path}")
+        print(f"复制图像: {src_img_path} -> {dst_img_path}")
         return dst_img_path
 
 
@@ -462,8 +419,10 @@ class Labelme2YOLO(object):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--json_dir', type=str,default=None,
+    parser.add_argument('--json_dir', type=str, default=None,
                         help='Please input the path of the labelme json files.')
+    parser.add_argument('--image_dir', type=str, default=None,
+                        help='Please input the path of the image files (if different from json_dir).')
     parser.add_argument('--val_size', type=float, nargs='?', default=0.1,
                         help='Please input the validation dataset size, for example 0.1 ')
     parser.add_argument('--json_name', type=str, nargs='?', default=None,
@@ -483,16 +442,22 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=str, choices=['seg', 'det'], default=None,
                         help='Conversion mode: seg (segmentation) or det (detection). If omitted, falls back to --seg flag for backward compatibility.')
 
-    # 兼容旧参数 --seg：若 --mode 未给出，则以 --seg 为准；否则以 --mode 为准
-
     args = parser.parse_args(sys.argv[1:])
 
+    # 示例使用方式（针对您的特定路径）
+    if not args.json_dir:
+        # 如果没有提供参数，使用您指定的默认路径
+        args.json_dir = '/home/lenovo/code/CHT/datasets/Xray/labelConvert/data_out'
+        args.image_dir = '/home/lenovo/code/CHT/datasets/Xray/labelConvert/data'
+        print(f"使用默认路径：")
+        print(f"  JSON目录: {args.json_dir}")
+        print(f"  图像目录: {args.image_dir}")
+
     convertor = Labelme2YOLO(args.json_dir,
+                             image_dir=args.image_dir,
                              to_seg=args.seg,
                              filter_label=args.filter_label,
                              unify_to_crack=args.unify_to_crack,
                              output_dir=args.output_dir)
-    if args.json_name is None:
-        convertor.convert(val_size=args.val_size)
-    else:
-        convertor.convert_mypath(val_size=args.val_size)
+
+    convertor.convert(val_size=args.val_size)
