@@ -730,9 +730,9 @@ YOLO特定参数:
         """)
 
     parser.add_argument('--input_dir', type=str,
-                        default="/home/lenovo/code/CHT/datasets/Xray/opensource/crop_weld_data",
+                        default="/home/lenovo/code/CHT/datasets/Xray/opensource/crop_weld_data_part",
                         help='输入目录路径，包含crop_weld_images和crop_weld_jsons')
-    parser.add_argument('--output_dir', type=str, default="./preprocessed_data2",
+    parser.add_argument('--output_dir', type=str, default="./preprocessed_data2/part",
                         help='输出目录路径')
     parser.add_argument('--mode', type=str, choices=['original', 'windowing'], default='windowing',
                         help='图像增强模式: original(直方图均衡+CLAHE) 或 windowing(窗宽窗位)')

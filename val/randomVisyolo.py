@@ -156,7 +156,7 @@ if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Visualize YOLO dataset annotations')
     parser.add_argument('--data_dir', type=str,
-                        default='/home/lenovo/code/CHT/detect/dataprocess/testdata/output/windowing',
+                        default='/home/lenovo/code/CHT/detect/dataprocess/preprocessed_data2/part/YOLODataset_seg',
                         help='Path to the dataset directory')
     parser.add_argument('--format', type=str, choices=['seg', 'det'], default='seg',
                         help='Format type: seg (segmentation) or det (detection)')
